@@ -85,7 +85,9 @@ public class FinalizePrivateFields extends Recipe {
                         .stream()
                         .filter(entry -> entry.getValue() == 1)
                         .map(Map.Entry::getKey)
-                        .collect(toSet());
+                        .collect(toCollection(HashSet::new));
+                Set<JavaType.Variable> capturedByEarlierLambda = collectFieldsReadInEarlierLambdaInitializers(classDecl, privateFieldsToBeFinalized);
+                privateFieldsToBeFinalized.removeAll(capturedByEarlierLambda);
 
                 return super.visitClassDeclaration(classDecl, ctx);
             }
@@ -152,6 +154,84 @@ public class FinalizePrivateFields extends Recipe {
 
     private static boolean isInnerClass(J.ClassDeclaration classDecl) {
         return classDecl.getType() != null && classDecl.getType().getOwningClass() != null;
+    }
+
+    /**
+     * Returns the subset of {@code candidates} that are READ inside a lambda or
+     * anonymous class which itself is used as an instance field initializer.
+     * <p>
+     * Instance field initializers execute in declaration order, before the
+     * constructor body. If a candidate field is only assigned in the constructor
+     * but is read inside such a lambda/anon-class, making it {@code final} causes
+     * a "variable might not have been initialized" compile error.
+     */
+    private static Set<JavaType.Variable> collectFieldsReadInEarlierLambdaInitializers(
+            J.ClassDeclaration classDecl,
+            Set<JavaType.Variable> candidates) {
+
+        Set<JavaType.Variable> unsafe = new HashSet<>();
+
+        for (Statement stmt : classDecl.getBody().getStatements()) {
+            if (!(stmt instanceof J.VariableDeclarations)) {
+                continue;
+            }
+            J.VariableDeclarations varDecl = (J.VariableDeclarations) stmt;
+
+            // Only look at instance field initializers (non-static)
+            if (varDecl.hasModifier(J.Modifier.Type.Static)) {
+                continue;
+            }
+
+            for (J.VariableDeclarations.NamedVariable namedVar : varDecl.getVariables()) {
+                Expression init = namedVar.getInitializer();
+                if (init == null) {
+                    continue;
+                }
+
+                // Walk the initializer; when we enter a lambda or anonymous class,
+                // collect any identifiers that resolve to one of our candidate fields.
+                new JavaIsoVisitor<Set<JavaType.Variable>>() {
+
+                    // Enter a lambda — scan its body for reads of candidate fields
+                    @Override
+                    public J.Lambda visitLambda(J.Lambda lambda, Set<JavaType.Variable> acc) {
+                        scanForFieldReads(lambda, candidates, acc);
+                        return lambda; // don't recurse further; scanForFieldReads handles it
+                    }
+
+                    // Enter an anonymous class — same treatment
+                    @Override
+                    public J.NewClass visitNewClass(J.NewClass newClass, Set<JavaType.Variable> acc) {
+                        if (newClass.getBody() != null) {
+                            scanForFieldReads(newClass, candidates, acc);
+                            return newClass;
+                        }
+                        return super.visitNewClass(newClass, acc);
+                    }
+
+                }.visit(init, unsafe);
+            }
+        }
+        return unsafe;
+    }
+
+    /**
+     * Scans {@code subtree} for any {@link J.Identifier} whose field type is
+     * in {@code candidates}, adding matches to {@code acc}.
+     */
+    private static void scanForFieldReads(J subtree,
+                                        Set<JavaType.Variable> candidates,
+                                        Set<JavaType.Variable> acc) {
+        new JavaIsoVisitor<Set<JavaType.Variable>>() {
+            @Override
+            public J.Identifier visitIdentifier(J.Identifier identifier,
+                                                Set<JavaType.Variable> acc) {
+                if (candidates.contains(identifier.getFieldType())) {
+                    acc.add(identifier.getFieldType());
+                }
+                return super.visitIdentifier(identifier, acc);
+            }
+        }.visit(subtree, acc);
     }
 
     private static class CollectPrivateFieldsAssignmentCounts extends JavaIsoVisitor<Map<JavaType.Variable, Integer>> {

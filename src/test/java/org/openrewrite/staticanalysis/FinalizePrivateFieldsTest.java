@@ -926,4 +926,26 @@ class FinalizePrivateFieldsTest implements RewriteTest {
               """
           ));
     }
+    @Test
+    void finalizePrivateFieldCapturedByLambdaInInstanceInitializer() {
+        rewriteRun(
+            spec -> spec.recipe(new FinalizePrivateFields()),
+            java(
+                """
+                import java.util.function.Function;
+                public class Foo {
+                    private String name;
+                    protected Function<Throwable, Void> logAndAccept = throwable -> {
+                        System.out.println(name);
+                        return null;
+                    };
+                    public Foo(String name) {
+                        this.name = name;
+                    }
+                }
+                """
+                // No second argument = expect NO change (recipe should skip this field)
+            )
+        );
+    }
 }
